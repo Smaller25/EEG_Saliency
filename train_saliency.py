@@ -85,8 +85,8 @@ class EEGDataset:
     def __getitem__(self, i):
         eeg = self.data[i]["eeg"].float().t()
         eeg = eeg[self.time_low:self.time_high, :]
-        label = self.data[i]["label"]
-        image_index = self.data[i]["image"]
+        label = self.labels[self.data[i]['label']]
+        image_index = self.images[self.data[i]['image']]
         
         # 이미지 로딩
         image_path = os.path.join(self.image_root, f"{image_index}.JPEG")
@@ -142,11 +142,11 @@ def get_eeg_train_dataloader(eeg_path, split_path, subject=0, split_name='train'
 
     split_dataset = Splitter(dataset, split_path, split_num=0, split_name=split_name)
 
-    if sampler = 'original':
+    if sampler == 'original':
         # 여기서 split 이후 label들을 추출함
         labels = [split_dataset[i][1] for i in range(len(split_dataset))]
         batch_sampler = LabelBasedBatchSampler(labels, batch_size)
-        loader = DataLoader(test_split, batch_sampler=sampler, batch_size=batch_size, shuffle=False, num_workers=0)
+        loader = DataLoader(split_dataset, batch_sampler=batch_sampler, num_workers=0)
     else:
         raise ValueError("sampler must be 'original', anything else isn't implemented")
 
@@ -189,23 +189,23 @@ class StructuredHingeLoss(nn.Module):
         self.margin = margin
 
     def forward(self, eeg_emb, img_emb, labels):
-    batch_size = eeg_emb.size(0)
-    compatibility = torch.matmul(eeg_emb, img_emb.T)  # (B, B)
+        batch_size = eeg_emb.size(0)
+        compatibility = torch.matmul(eeg_emb, img_emb.T)  # (B, B)
 
-    correct_scores = torch.diag(compatibility).unsqueeze(1)  # (B, 1)
+        correct_scores = torch.diag(compatibility).unsqueeze(1)  # (B, 1)
 
-    # Label 기반 inter-class masking
-    label_matrix = labels.unsqueeze(1).expand(-1, batch_size)
-    label_mask = label_matrix != label_matrix.T  # True where labels differ
+        # Label 기반 inter-class masking
+        label_matrix = labels.unsqueeze(1).expand(-1, batch_size)
+        label_mask = label_matrix != label_matrix.T  # True where labels differ
 
-    # imposter scores: only other-class embeddings
-    imposter_scores_e = compatibility.masked_fill(~label_mask, float('-inf')).max(dim=1)[0].unsqueeze(1)
-    imposter_scores_v = compatibility.T.masked_fill(~label_mask.T, float('-inf')).max(dim=1)[0].unsqueeze(1)
+        # imposter scores: only other-class embeddings
+        imposter_scores_e = compatibility.masked_fill(~label_mask, float('-inf')).max(dim=1)[0].unsqueeze(1)
+        imposter_scores_v = compatibility.T.masked_fill(~label_mask.T, float('-inf')).max(dim=1)[0].unsqueeze(1)
 
-    loss_e = F.relu(self.margin + imposter_scores_e - correct_scores).mean()
-    loss_v = F.relu(self.margin + imposter_scores_v - correct_scores).mean()
+        loss_e = F.relu(self.margin + imposter_scores_e - correct_scores).mean()
+        loss_v = F.relu(self.margin + imposter_scores_v - correct_scores).mean()
 
-    return (loss_e + loss_v) / 2
+        return (loss_e + loss_v) / 2
 
 def train_model(eeg_encoder, image_encoder, train_loader, optimizer, device,
                 margin=0.2, epochs=100, base_save_dir='./checkpoints'):
@@ -229,7 +229,7 @@ def train_model(eeg_encoder, image_encoder, train_loader, optimizer, device,
     for epoch in range(epochs):
         epoch_loss = 0.0
         best_loss = 0.0
-        for eegs, images, _ in train_loader:
+        for eegs, labels, _, images in train_loader:
             eegs, images = eegs.to(device), images.to(device)
             eeg_emb = eeg_encoder(eegs)
             img_emb = image_encoder(images)
@@ -273,8 +273,8 @@ if __name__ == "__main__":
     parser.add_argument('--subject', type=int, default=0, help='Subject ID (1~6) or 0 for all')
     parser.add_argument('--image_root', type=str, default='/mnt/d/EEG_saliency_data/imagenet_select/', help='Path to directory containing stimulus images')
     parser.add_argument('--epochs', default=10, type=int, help='number of max epochs')
-    parser.add_argument('--batch_size', type=int, default=64, help='number of data samples in a batch')
-    parser.add_argumnet('--sampler', type=str, default='original', help='choose sampler, default is original method in paper:visual saliency detection guided by neural signals')
+    parser.add_argument('--batch_size', type=int, default=10, help='number of data samples in a batch')
+    parser.add_argument('--sampler', type=str, default='original', help='choose sampler, default is original method in paper:visual saliency detection guided by neural signals')
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -292,7 +292,8 @@ if __name__ == "__main__":
     split_name='test',
     batch_size=1,
     time_low=args.time_low,
-    time_high=args.time_high
+    time_high=args.time_high,
+    image_root=args.image_root
     )
 
     train_loader = get_eeg_train_dataloader(
@@ -302,8 +303,9 @@ if __name__ == "__main__":
     split_name='train',
     batch_size=args.batch_size,
     time_low=args.time_low,
-    time_high=args.time_high
-    sampler=args.sampler
+    time_high=args.time_high,
+    sampler=args.sampler,
+    image_root=args.image_root
     )
         
     # model 선언
