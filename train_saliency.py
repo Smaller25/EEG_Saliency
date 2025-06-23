@@ -15,6 +15,7 @@ from torch.utils.data import Sampler
 import random
 from collections import defaultdict
 import json
+import torchvision.transforms.functional as TF
 
 # Data augmentation
 # ImageNet 정규화 기준
@@ -256,6 +257,8 @@ def train_model(eeg_encoder, image_encoder, train_loader, optimizer, device,
             torch.save(eeg_encoder.state_dict(), eeg_path)
             torch.save(image_encoder.state_dict(), img_path)
             print(f"[Saving Model] {eeg_path}, {img_path}")
+    
+    return save_dir
 
 
 # 사용 안할 예정
@@ -267,9 +270,48 @@ def evaluate(saliency_map, fixation_map):
     return roc_auc_score(fixation_flat, saliency_flat)
 
 
+def visualize_and_save_saliency(image_tensor, saliency_map, label, save_dir):
+    # image_tensor: (3, H, W) → convert to (H, W, 3)
+    image_np = image_tensor.detach().cpu().numpy()
+    image_np = np.transpose(image_np, (1, 2, 0))  # C, H, W → H, W, C
+    image_np = np.clip(image_np, 0, 1)  # Just in case
+
+    # Resize saliency map to match image resolution
+    H, W = image_np.shape[:2]
+    if saliency_map.shape != (H, W):
+        saliency_resized = resize(saliency_map, (H, W), mode='reflect', anti_aliasing=True)
+    else:
+        saliency_resized = saliency_map
+
+    saliency_resized = np.clip(saliency_resized, 0, 1)
+
+    # Generate heatmap (cmap is RGBA)
+    cmap = plt.get_cmap('hot')
+    heatmap = cmap(saliency_resized)[:, :, :3]  # Drop alpha
+
+    # Overlay
+    overlay = np.clip(0.6 * image_np + 0.4 * heatmap, 0, 1)
+
+    # Plot and save
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+    axs[0].imshow(image_np)
+    axs[0].set_title('Original Image')
+    axs[1].imshow(saliency_resized, cmap='hot')
+    axs[1].set_title('Saliency Map')
+    axs[2].imshow(overlay)
+    axs[2].set_title('Overlay')
+    for ax in axs:
+        ax.axis('off')
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'{label}.png')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
+
+
 # ---------------------------------------------
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description='Train EEG_Saliency Model')
     parser.add_argument('--eeg_dataset', type=str, default='/mnt/d/EEG_saliency_data/eeg_5_95_std.pth', help='Path to EEG dataset')
     parser.add_argument('--splits_path', type=str, default='/mnt/d/EEG_saliency_data/block_splits_by_image_all.pth', help='Path to split .pth file')
@@ -277,9 +319,10 @@ if __name__ == "__main__":
     parser.add_argument('--time_high', type=int, default=460, help='End index of EEG time slice (in samples)')
     parser.add_argument('--subject', type=int, default=0, help='Subject ID (1~6) or 0 for all')
     parser.add_argument('--image_root', type=str, default='/mnt/d/EEG_saliency_data/imagenet_select/', help='Path to directory containing stimulus images')
-    parser.add_argument('--epochs', default=10, type=int, help='number of max epochs')
+    parser.add_argument('--epochs', default=100, type=int, help='number of max epochs')
     parser.add_argument('--batch_size', type=int, default=10, help='number of data samples in a batch')
     parser.add_argument('--sampler', type=str, default='original', help='choose sampler, default is original method in paper:visual saliency detection guided by neural signals')
+    parser.add_argument('--test_file', default = None, help='if test, just showing saliency map')
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -287,53 +330,90 @@ if __name__ == "__main__":
     # eeg = torch.randn(1, 1, 32, 250).to(device)
     # image = torch.randn(1, 3, 128, 128).to(device)
     # fixation_map = np.zeros((128, 128))
-    # fixation_map[40:60, 40:60] = 1
+    # fixation_map[40:60, 40:60] = 1      
 
-    # real dataset 
-    test_loader = get_eeg_test_dataloader(
-    eeg_path=args.eeg_dataset,
-    split_path=args.splits_path,
-    subject=args.subject,
-    split_name='test',
-    batch_size=1,
-    time_low=args.time_low,
-    time_high=args.time_high,
-    image_root=args.image_root
-    )
+    # Test
+    if args.test_file:
+        test_loader = get_eeg_test_dataloader(
+        eeg_path=args.eeg_dataset,
+        split_path=args.splits_path,
+        subject=args.subject,
+        split_name='test',
+        batch_size=1,
+        time_low=args.time_low,
+        time_high=args.time_high,
+        image_root=args.image_root
+        )
 
-    train_loader = get_eeg_train_dataloader(
-    eeg_path=args.eeg_dataset,
-    split_path=args.splits_path,
-    subject=args.subject,
-    split_name='train',
-    batch_size=args.batch_size,
-    time_low=args.time_low,
-    time_high=args.time_high,
-    sampler=args.sampler,
-    image_root=args.image_root
-    )
-        
-    # model 선언
-    eeg_encoder = EEGNet().to(device)
-    img_encoder = Inception_ImageEncoder(out_dim=128).to(device)
-    print("model is ready")
+        eeg_encoder = EEGNet().to(device)
+        img_encoder = Inception_ImageEncoder(out_dim=128).to(device)
+        eeg_encoder.load_state_dict(torch.load(os.path.join(args.test_file, 'eeg_encoder_epoch10.pth'), map_location=device))
+        img_encoder.load_state_dict(torch.load(os.path.join(args.test_file, 'image_encoder_epoch10.pth'), map_location=device))
 
-    optimizer = torch.optim.Adam(list(eeg_encoder.parameters()) + list(img_encoder.parameters()), lr=1e-4)
+        eeg_encoder.eval()
+        img_encoder.eval()
+        i = 0
+        for eeg, label, image_index, image_tensor in test_loader:
+            if i > 3:
+                break
+            image_tensor = image_tensor.to(device)
+            saliency_map = compute_saliency(eeg, image_tensor, eeg_encoder, img_encoder)
+            #################################
+            # Q3. visualize saliency map
+            #################################
+            visualize_and_save_saliency(image_tensor.squeeze(0), saliency_map, str(label.item()), args.test_file)
+            i +=1
+            break
     
-    # Train the model
-    train_model(eeg_encoder, img_encoder, train_loader, optimizer, device, epochs=args.epochs)
+    
+    # Train
+    else:
+        # dataset 
+        test_loader = get_eeg_test_dataloader(
+        eeg_path=args.eeg_dataset,
+        split_path=args.splits_path,
+        subject=args.subject,
+        split_name='test',
+        batch_size=1,
+        time_low=args.time_low,
+        time_high=args.time_high,
+        image_root=args.image_root
+        )
 
-    # Evaluate on test sample
-    eeg_encoder.eval()
-    img_encoder.eval()
-    for eeg, label, image_index, image_tensor in test_loader:
-        image_tensor = image_tensor.to(device)
-        saliency_map = compute_saliency(eeg, image_tensor, eeg_encoder, img_encoder)
-        #################################
-        # Q3. visualize saliency map
-        #################################
-        plt.imshow(saliency_map, cmap='hot')
-        plt.title("Saliency Map")
-        plt.axis('off')
-        plt.show()
-        break
+        train_loader = get_eeg_train_dataloader(
+        eeg_path=args.eeg_dataset,
+        split_path=args.splits_path,
+        subject=args.subject,
+        split_name='train',
+        batch_size=args.batch_size,
+        time_low=args.time_low,
+        time_high=args.time_high,
+        sampler=args.sampler,
+        image_root=args.image_root
+        )
+            
+        # model 선언
+        eeg_encoder = EEGNet().to(device)
+        img_encoder = Inception_ImageEncoder(out_dim=128).to(device)
+        print("model is ready")
+
+        optimizer = torch.optim.Adam(list(eeg_encoder.parameters()) + list(img_encoder.parameters()), lr=1e-4)
+        
+        # Train the model
+        save_dir = train_model(eeg_encoder, img_encoder, train_loader, optimizer, device, epochs=args.epochs)
+
+        # Evaluate on test sample
+        eeg_encoder.eval()
+        img_encoder.eval()
+        i = 0
+        for eeg, label, image_index, image_tensor in test_loader:
+            if i > 3:
+                break
+            image_tensor = image_tensor.to(device)
+            saliency_map = compute_saliency(eeg, image_tensor, eeg_encoder, img_encoder)
+            #################################
+            # Q3. visualize saliency map
+            #################################
+            visualize_and_save_saliency(image_tensor.squeeze(0), saliency_map, str(label.item()), save_dir)
+            i +=1
+            break
