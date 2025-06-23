@@ -14,6 +14,7 @@ import time
 from torch.utils.data import Sampler
 import random
 from collections import defaultdict
+import json
 
 # Data augmentation
 # ImageNet 정규화 기준
@@ -85,7 +86,7 @@ class EEGDataset:
     def __getitem__(self, i):
         eeg = self.data[i]["eeg"].float().t()
         eeg = eeg[self.time_low:self.time_high, :]
-        label = self.labels[self.data[i]['label']]
+        label = self.data[i]['label']
         image_index = self.images[self.data[i]['image']]
         
         # 이미지 로딩
@@ -163,6 +164,7 @@ def compatibility(eeg_embed, img_embed):
 # utils : compute_saliency (with multi-scale)
 def compute_saliency(eeg, image, eeg_enc, img_enc, scale=16):
     device = image.device
+    eeg = eeg.permute(0, 2, 1).unsqueeze(1).to(device) # [B, 1, 128, 440] 형태
     eeg_embed = eeg_enc(eeg)
     full_embed = img_enc(image)
     full_score = compatibility(eeg_embed, full_embed)
@@ -230,11 +232,14 @@ def train_model(eeg_encoder, image_encoder, train_loader, optimizer, device,
         epoch_loss = 0.0
         best_loss = 0.0
         for eegs, labels, _, images in train_loader:
-            eegs, images = eegs.to(device), images.to(device)
+            eegs = eegs.permute(0, 2, 1).unsqueeze(1).to(device)  # [B, 1, 128, 440]
+            images = images.to(device)
+            labels = labels.to(device)
+
             eeg_emb = eeg_encoder(eegs)
             img_emb = image_encoder(images)
 
-            loss = criterion(eeg_emb, img_emb, None)
+            loss = criterion(eeg_emb, img_emb, labels)
 
             optimizer.zero_grad()
             loss.backward()
@@ -310,7 +315,8 @@ if __name__ == "__main__":
         
     # model 선언
     eeg_encoder = EEGNet().to(device)
-    img_encoder = Inception_ImageEncoder().to(device)
+    img_encoder = Inception_ImageEncoder(out_dim=128).to(device)
+    print("model is ready")
 
     optimizer = torch.optim.Adam(list(eeg_encoder.parameters()) + list(img_encoder.parameters()), lr=1e-4)
     
@@ -321,7 +327,6 @@ if __name__ == "__main__":
     eeg_encoder.eval()
     img_encoder.eval()
     for eeg, label, image_index, image_tensor in test_loader:
-        eeg = eeg.to(device)
         image_tensor = image_tensor.to(device)
         saliency_map = compute_saliency(eeg, image_tensor, eeg_encoder, img_encoder)
         #################################
