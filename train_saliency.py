@@ -5,7 +5,8 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-from models import EEGNet, Inception_ImageEncoder
+from models.eegencoder import EEGNet
+from models.imageencoder import Inception_ImageEncoder
 from utils import compute_saliency, visualize_and_save_saliency
 from dataloader import get_eeg_test_dataloader, get_eeg_train_dataloader
 
